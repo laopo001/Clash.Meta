@@ -11,6 +11,10 @@ import (
 	"github.com/Dreamacro/clash/log"
 )
 
+const (
+	minInterval = time.Minute * 5
+)
+
 var (
 	fileMode os.FileMode = 0o666
 	dirMode  os.FileMode = 0o755
@@ -21,12 +25,11 @@ type parser[V any] func([]byte) (V, error)
 type fetcher[V any] struct {
 	name      string
 	vehicle   types.Vehicle
-	updatedAt *time.Time
-	ticker    *time.Ticker
+	updatedAt time.Time
+	interval  time.Duration
 	done      chan struct{}
 	hash      [16]byte
 	parser    parser[V]
-	interval  time.Duration
 	onUpdate  func(V)
 }
 
@@ -44,20 +47,14 @@ func (f *fetcher[V]) Initial() (V, error) {
 		err     error
 		isLocal bool
 	)
-
 	if stat, fErr := os.Stat(f.vehicle.Path()); fErr == nil {
 		buf, err = os.ReadFile(f.vehicle.Path())
 		modTime := stat.ModTime()
-		f.updatedAt = &modTime
+		f.updatedAt = modTime
 		isLocal = true
-		if f.interval != 0 && modTime.Add(f.interval).Before(time.Now()) {
-			defer func() {
-				log.Infoln("[Provider] %s's proxies not updated for a long time, force refresh", f.Name())
-				go f.Update()
-			}()
-		}
 	} else {
 		buf, err = f.vehicle.Read()
+		f.updatedAt = time.Now()
 	}
 
 	if err != nil {
@@ -69,6 +66,8 @@ func (f *fetcher[V]) Initial() (V, error) {
 		if !isLocal {
 			return getZero[V](), err
 		}
+
+		log.Warnln("Initial local provider %s: %s", f.Name(), err.Error())
 
 		// parse local file error, fallback to remote
 		buf, err = f.vehicle.Read()
@@ -93,7 +92,7 @@ func (f *fetcher[V]) Initial() (V, error) {
 	f.hash = md5.Sum(buf)
 
 	// pull proxies automatically
-	if f.ticker != nil {
+	if f.interval > 0 {
 		go f.pullLoop()
 	}
 
@@ -109,8 +108,10 @@ func (f *fetcher[V]) Update() (V, bool, error) {
 	now := time.Now()
 	hash := md5.Sum(buf)
 	if bytes.Equal(f.hash[:], hash[:]) {
-		f.updatedAt = &now
-		os.Chtimes(f.vehicle.Path(), now, now)
+		f.updatedAt = now
+
+		os.Chtimes(f.vehicle.Path(), time.Now(), time.Now())
+
 		return getZero[V](), true, nil
 	}
 
@@ -125,23 +126,33 @@ func (f *fetcher[V]) Update() (V, bool, error) {
 		}
 	}
 
-	f.updatedAt = &now
+	f.updatedAt = now
 	f.hash = hash
 
 	return proxies, false, nil
 }
 
 func (f *fetcher[V]) Destroy() error {
-	if f.ticker != nil {
+	if f.interval > 0 {
 		f.done <- struct{}{}
 	}
 	return nil
 }
 
 func (f *fetcher[V]) pullLoop() {
+	initialInterval := f.interval - time.Since(f.updatedAt)
+	if initialInterval < minInterval {
+		initialInterval = minInterval
+	}
+
+	timer := time.NewTimer(initialInterval)
+	defer timer.Stop()
+
 	for {
 		select {
-		case <-f.ticker.C:
+		case <-timer.C:
+			timer.Reset(f.interval)
+
 			elm, same, err := f.Update()
 			if err != nil {
 				log.Warnln("[Provider] %s pull error: %s", f.Name(), err.Error())
@@ -158,7 +169,6 @@ func (f *fetcher[V]) pullLoop() {
 				f.onUpdate(elm)
 			}
 		case <-f.done:
-			f.ticker.Stop()
 			return
 		}
 	}
@@ -177,17 +187,12 @@ func safeWrite(path string, buf []byte) error {
 }
 
 func newFetcher[V any](name string, interval time.Duration, vehicle types.Vehicle, parser parser[V], onUpdate func(V)) *fetcher[V] {
-	var ticker *time.Ticker
-	if interval != 0 {
-		ticker = time.NewTicker(interval)
-	}
-
 	return &fetcher[V]{
 		name:     name,
-		ticker:   ticker,
+		interval: interval,
 		vehicle:  vehicle,
 		parser:   parser,
-		done:     make(chan struct{}, 1),
+		done:     make(chan struct{}, 8),
 		onUpdate: onUpdate,
 	}
 }
