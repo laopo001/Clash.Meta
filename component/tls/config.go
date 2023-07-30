@@ -17,7 +17,7 @@ import (
 var trustCerts []*x509.Certificate
 var certPool *x509.CertPool
 var mutex sync.RWMutex
-var errNotMacth error = errors.New("certificate fingerprints do not match")
+var errNotMatch = errors.New("certificate fingerprints do not match")
 
 func AddCertificate(certificate string) error {
 	mutex.Lock()
@@ -33,10 +33,22 @@ func AddCertificate(certificate string) error {
 	}
 }
 
+func initializeCertPool() {
+	var err error
+	certPool, err = x509.SystemCertPool()
+	if err != nil {
+		certPool = x509.NewCertPool()
+	}
+	for _, cert := range trustCerts {
+		certPool.AddCert(cert)
+	}
+}
+
 func ResetCertificate() {
 	mutex.Lock()
 	defer mutex.Unlock()
 	trustCerts = nil
+	initializeCertPool()
 }
 
 func getCertPool() *x509.CertPool {
@@ -49,12 +61,7 @@ func getCertPool() *x509.CertPool {
 		if certPool != nil {
 			return certPool
 		}
-		certPool, err := x509.SystemCertPool()
-		if err == nil {
-			for _, cert := range trustCerts {
-				certPool.AddCert(cert)
-			}
-		}
+		initializeCertPool()
 	}
 	return certPool
 }
@@ -72,7 +79,7 @@ func verifyFingerprint(fingerprint *[32]byte) func(rawCerts [][]byte, verifiedCh
 				}
 			}
 		}
-		return errNotMacth
+		return errNotMatch
 	}
 }
 

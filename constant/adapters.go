@@ -10,6 +10,7 @@ import (
 	"time"
 
 	N "github.com/Dreamacro/clash/common/net"
+	"github.com/Dreamacro/clash/common/utils"
 	"github.com/Dreamacro/clash/component/dialer"
 )
 
@@ -40,9 +41,10 @@ const (
 )
 
 const (
-	DefaultTCPTimeout = 5 * time.Second
-	DefaultUDPTimeout = DefaultTCPTimeout
-	DefaultTLSTimeout = DefaultTCPTimeout
+	DefaultTCPTimeout           = 5 * time.Second
+	DefaultUDPTimeout           = DefaultTCPTimeout
+	DefaultTLSTimeout           = DefaultTCPTimeout
+	DefaultMaxHealthCheckUrlNum = 16
 )
 
 var ErrNotSupport = errors.New("no support")
@@ -81,7 +83,7 @@ type Conn interface {
 }
 
 type PacketConn interface {
-	net.PacketConn
+	N.EnhancePacketConn
 	Connection
 	// Deprecate WriteWithMetadata because of remote resolve DNS cause TURN failed
 	// WriteWithMetadata(p []byte, metadata *Metadata) (n int, err error)
@@ -106,11 +108,11 @@ type ProxyAdapter interface {
 	//
 	// Examples:
 	//	conn, _ := net.DialContext(context.Background(), "tcp", "host:port")
-	//	conn, _ = adapter.StreamConn(conn, metadata)
+	//	conn, _ = adapter.StreamConnContext(context.Background(), conn, metadata)
 	//
 	// It returns a C.Conn with protocol which start with
 	// a new session (if any)
-	StreamConn(c net.Conn, metadata *Metadata) (net.Conn, error)
+	StreamConnContext(ctx context.Context, c net.Conn, metadata *Metadata) (net.Conn, error)
 
 	// DialContext return a C.Conn with protocol which
 	// contains multiplexing-related reuse logic (if any)
@@ -132,7 +134,7 @@ type ProxyAdapter interface {
 }
 
 type Group interface {
-	URLTest(ctx context.Context, url string) (mp map[string]uint16, err error)
+	URLTest(ctx context.Context, url string, expectedStatus utils.IntRanges[uint16]) (mp map[string]uint16, err error)
 	GetProxies(touch bool) []Proxy
 	Touch()
 }
@@ -142,12 +144,23 @@ type DelayHistory struct {
 	Delay uint16    `json:"delay"`
 }
 
+type DelayHistoryStoreType int
+
+const (
+	OriginalHistory DelayHistoryStoreType = iota
+	ExtraHistory
+	DropHistory
+)
+
 type Proxy interface {
 	ProxyAdapter
 	Alive() bool
+	AliveForTestUrl(url string) bool
 	DelayHistory() []DelayHistory
+	ExtraDelayHistory() map[string][]DelayHistory
 	LastDelay() uint16
-	URLTest(ctx context.Context, url string) (uint16, error)
+	LastDelayForTestUrl(url string) uint16
+	URLTest(ctx context.Context, url string, expectedStatus utils.IntRanges[uint16], store DelayHistoryStoreType) (uint16, error)
 
 	// Deprecated: use DialContext instead.
 	Dial(metadata *Metadata) (Conn, error)
@@ -217,7 +230,7 @@ type UDPPacket interface {
 	// - variable source IP/Port is important to STUN
 	// - if addr is not provided, WriteBack will write out UDP packet with SourceIP/Port equals to original Target,
 	//   this is important when using Fake-IP.
-	WriteBack(b []byte, addr net.Addr) (n int, err error)
+	WriteBack
 
 	// Drop call after packet is used, could recycle buffer in this function.
 	Drop()
@@ -236,10 +249,19 @@ type PacketAdapter interface {
 	Metadata() *Metadata
 }
 
-type NatTable interface {
-	Set(key string, e PacketConn)
+type WriteBack interface {
+	WriteBack(b []byte, addr net.Addr) (n int, err error)
+}
 
-	Get(key string) PacketConn
+type WriteBackProxy interface {
+	WriteBack
+	UpdateWriteBack(wb WriteBack)
+}
+
+type NatTable interface {
+	Set(key string, e PacketConn, w WriteBackProxy)
+
+	Get(key string) (PacketConn, WriteBackProxy)
 
 	GetOrCreateLock(key string) (*sync.Cond, bool)
 

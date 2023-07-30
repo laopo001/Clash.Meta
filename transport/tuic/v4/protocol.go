@@ -1,4 +1,4 @@
-package tuic
+package v4
 
 import (
 	"encoding/binary"
@@ -36,6 +36,8 @@ const (
 	ResponseType     = CommandType(0xff)
 )
 
+const VER byte = 0x04
+
 func (c CommandType) String() string {
 	switch c {
 	case AuthenticateType:
@@ -66,7 +68,7 @@ type CommandHead struct {
 
 func NewCommandHead(TYPE CommandType) CommandHead {
 	return CommandHead{
-		VER:  0x04,
+		VER:  VER,
 		TYPE: TYPE,
 	}
 }
@@ -465,6 +467,11 @@ func NewAddress(metadata *C.Metadata) Address {
 }
 
 func NewAddressNetAddr(addr net.Addr) (Address, error) {
+	if addr, ok := addr.(interface{ AddrPort() netip.AddrPort }); ok {
+		if addrPort := addr.AddrPort(); addrPort.IsValid() { // sing's M.Socksaddr maybe return an invalid AddrPort if it's a DomainName
+			return NewAddressAddrPort(addrPort), nil
+		}
+	}
 	addrStr := addr.String()
 	if addrPort, err := netip.ParseAddrPort(addrStr); err == nil {
 		return NewAddressAddrPort(addrPort), nil

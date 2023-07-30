@@ -41,7 +41,8 @@ func (c *packet) LocalAddr() net.Addr {
 }
 
 func (c *packet) Drop() {
-	pool.Put(c.buf)
+	_ = pool.Put(c.buf)
+	c.buf = nil
 }
 
 func (c *packet) InAddr() net.Addr {
@@ -78,7 +79,7 @@ func createOrGetLocalConn(rAddr, lAddr net.Addr, in chan<- C.PacketAdapter, natT
 			}()
 			conn, err := listenLocalConn(rAddr, lAddr, in, natTable)
 			if err != nil {
-				log.Errorln("listenLocalConn failed with error: %s, packet loss", err.Error())
+				log.Errorln("listenLocalConn failed with error: %s, packet loss (rAddr[%T]=%s lAddr[%T]=%s)", err.Error(), rAddr, remote, lAddr, local)
 				return nil, err
 			}
 			natTable.AddLocalConn(local, remote, conn)
