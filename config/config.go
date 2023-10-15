@@ -1346,7 +1346,7 @@ func parseTun(rawTun RawTun, general *General) error {
 	}
 	tunAddressPrefix = netip.PrefixFrom(tunAddressPrefix.Addr(), 30)
 
-	if !general.IPv6 || !verifyIP6() {
+	if !general.IPv6 {
 		rawTun.Inet6Address = nil
 	}
 
