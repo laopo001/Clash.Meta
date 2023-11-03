@@ -134,6 +134,7 @@ func (doh *dnsOverHTTPS) ExchangeContext(ctx context.Context, m *D.Msg) (msg *D.
 		// var result = make([]D.Question, 0)
 		for _, q := range m.Question {
 			if q.Qtype == 28 {
+				log.Warnln("[DNS PLUS] resolve %s only_ipv4 block", q.String())
 				return nil, fmt.Errorf("only_ipv4 block")
 			}
 		}
