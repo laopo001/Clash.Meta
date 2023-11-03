@@ -41,7 +41,8 @@ func (c *packet) LocalAddr() net.Addr {
 }
 
 func (c *packet) Drop() {
-	pool.Put(c.buf)
+	_ = pool.Put(c.buf)
+	c.buf = nil
 }
 
 func (c *packet) InAddr() net.Addr {
@@ -54,16 +55,15 @@ func (c *packet) InAddr() net.Addr {
 func createOrGetLocalConn(rAddr, lAddr net.Addr, in chan<- C.PacketAdapter, natTable C.NatTable) (*net.UDPConn, error) {
 	remote := rAddr.String()
 	local := lAddr.String()
-	localConn := natTable.GetLocalConn(local, remote)
+	localConn := natTable.GetForLocalConn(local, remote)
 	// localConn not exist
 	if localConn == nil {
-		lockKey := remote + "-lock"
-		cond, loaded := natTable.GetOrCreateLockForLocalConn(local, lockKey)
+		cond, loaded := natTable.GetOrCreateLockForLocalConn(local, remote)
 		if loaded {
 			cond.L.Lock()
 			cond.Wait()
 			// we should get localConn here
-			localConn = natTable.GetLocalConn(local, remote)
+			localConn = natTable.GetForLocalConn(local, remote)
 			if localConn == nil {
 				return nil, fmt.Errorf("localConn is nil, nat entry not exist")
 			}
@@ -73,15 +73,15 @@ func createOrGetLocalConn(rAddr, lAddr net.Addr, in chan<- C.PacketAdapter, natT
 				return nil, fmt.Errorf("cond is nil, nat entry not exist")
 			}
 			defer func() {
-				natTable.DeleteLocalConnMap(local, lockKey)
+				natTable.DeleteLockForLocalConn(local, remote)
 				cond.Broadcast()
 			}()
 			conn, err := listenLocalConn(rAddr, lAddr, in, natTable)
 			if err != nil {
-				log.Errorln("listenLocalConn failed with error: %s, packet loss", err.Error())
+				log.Errorln("listenLocalConn failed with error: %s, packet loss (rAddr[%T]=%s lAddr[%T]=%s)", err.Error(), rAddr, remote, lAddr, local)
 				return nil, err
 			}
-			natTable.AddLocalConn(local, remote, conn)
+			natTable.AddForLocalConn(local, remote, conn)
 			localConn = conn
 		}
 	}

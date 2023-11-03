@@ -2,11 +2,11 @@ package statistic
 
 import (
 	"os"
-	"sync"
 	"time"
 
 	"github.com/Dreamacro/clash/common/atomic"
 
+	"github.com/puzpuzpuz/xsync/v2"
 	"github.com/shirou/gopsutil/v3/process"
 )
 
@@ -14,6 +14,7 @@ var DefaultManager *Manager
 
 func init() {
 	DefaultManager = &Manager{
+		connections:   xsync.NewMapOf[Tracker](),
 		uploadTemp:    atomic.NewInt64(0),
 		downloadTemp:  atomic.NewInt64(0),
 		uploadBlip:    atomic.NewInt64(0),
@@ -27,7 +28,7 @@ func init() {
 }
 
 type Manager struct {
-	connections   sync.Map
+	connections   *xsync.MapOf[string, Tracker]
 	uploadTemp    *atomic.Int64
 	downloadTemp  *atomic.Int64
 	uploadBlip    *atomic.Int64
@@ -38,12 +39,25 @@ type Manager struct {
 	memory        uint64
 }
 
-func (m *Manager) Join(c tracker) {
+func (m *Manager) Join(c Tracker) {
 	m.connections.Store(c.ID(), c)
 }
 
-func (m *Manager) Leave(c tracker) {
+func (m *Manager) Leave(c Tracker) {
 	m.connections.Delete(c.ID())
+}
+
+func (m *Manager) Get(id string) (c Tracker) {
+	if value, ok := m.connections.Load(id); ok {
+		c = value
+	}
+	return
+}
+
+func (m *Manager) Range(f func(c Tracker) bool) {
+	m.connections.Range(func(key string, value Tracker) bool {
+		return f(value)
+	})
 }
 
 func (m *Manager) PushUploaded(size int64) {
@@ -66,9 +80,9 @@ func (m *Manager) Memory() uint64 {
 }
 
 func (m *Manager) Snapshot() *Snapshot {
-	connections := []tracker{}
-	m.connections.Range(func(key, value any) bool {
-		connections = append(connections, value.(tracker))
+	var connections []*TrackerInfo
+	m.Range(func(c Tracker) bool {
+		connections = append(connections, c.Info())
 		return true
 	})
 	return &Snapshot{
@@ -108,8 +122,8 @@ func (m *Manager) handle() {
 }
 
 type Snapshot struct {
-	DownloadTotal int64     `json:"downloadTotal"`
-	UploadTotal   int64     `json:"uploadTotal"`
-	Connections   []tracker `json:"connections"`
-	Memory        uint64    `json:"memory"`
+	DownloadTotal int64          `json:"downloadTotal"`
+	UploadTotal   int64          `json:"uploadTotal"`
+	Connections   []*TrackerInfo `json:"connections"`
+	Memory        uint64         `json:"memory"`
 }

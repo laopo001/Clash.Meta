@@ -95,11 +95,6 @@ jobs:
         shell: bash
 
       - name: Set variables
-        if: ${{github.ref_name=='Beta'}}
-        run: echo "VERSION=beta-$(git rev-parse --short HEAD)" >> $GITHUB_ENV
-        shell: bash
-
-      - name: Set variables
         if: ${{github.ref_name=='Meta'}}
         run: echo "VERSION=meta-$(git rev-parse --short HEAD)" >> $GITHUB_ENV
         shell: bash
@@ -126,9 +121,9 @@ jobs:
         shell: bash
 
       - name: Setup Go
-        uses: actions/setup-go@v3
+        uses: actions/setup-go@v4
         with:
-          go-version: "1.20"
+          go-version: "1.21"
           check-latest: true
 
       - name: Test
@@ -147,7 +142,7 @@ jobs:
         if: ${{ matrix.job.type=='WithCGO' && matrix.job.target=='android' }}
         id: setup-ndk
         with:
-          ndk-version: r25b
+          ndk-version: r26
           add-to-path: false
           local-cache: true
 
@@ -209,7 +204,7 @@ jobs:
 
   Upload-Prerelease:
     permissions: write-all
-    if: ${{ github.ref_type=='branch' }}
+    if: ${{ github.ref_type=='branch' && github.event_name != 'pull_request' }}
     needs: [Build]
     runs-on: ubuntu-latest
     steps:
@@ -223,7 +218,7 @@ jobs:
         working-directory: bin
 
       - name: Delete current release assets
-        uses: andreaswilli/delete-release-assets-action@v2.0.0
+        uses: 8Mi-Tech/delete-release-assets-action@main
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           tag: Prerelease-${{ github.ref_name }}
@@ -254,7 +249,6 @@ jobs:
         uses: softprops/action-gh-release@v1
         if: ${{  success() }}
         with:
-          tag: ${{ github.ref_name }}
           tag_name: Prerelease-${{ github.ref_name }}
           files: |
             bin/*
@@ -268,6 +262,23 @@ jobs:
     needs: [Build]
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      - name: Get tags
+        run: |
+          echo "CURRENTVERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_ENV
+          git fetch --tags
+          echo "PREVERSION=$(git describe --tags --abbrev=0 HEAD^)" >> $GITHUB_ENV
+
+      - name: Generate release notes
+        run: |
+          cp ./.github/genReleaseNote.sh ./
+          bash ./genReleaseNote.sh -v ${PREVERSION}...${CURRENTVERSION}
+          rm ./genReleaseNote.sh
+
       - uses: actions/download-artifact@v3
         with:
           name: artifact
@@ -281,9 +292,71 @@ jobs:
         uses: softprops/action-gh-release@v1
         if: ${{  success() }}
         with:
-          tag: ${{ github.ref_name }}
           tag_name: ${{ github.ref_name }}
           files: bin/*
           generate_release_notes: true
+          body_path: release.md
 
- 
+  Docker:
+    permissions: write-all
+    needs: [Build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v3
+        with:
+          name: artifact
+          path: bin/
+
+      - name: Display structure of downloaded files
+        run: ls -R
+        working-directory: bin
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v1
+
+      - name: Setup Docker buildx
+        uses: docker/setup-buildx-action@v1
+        with:
+          version: latest
+
+      # Extract metadata (tags, labels) for Docker
+      # https://github.com/docker/metadata-action
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v3
+        with:
+          images: ${{ env.REGISTRY }}/${{ secrets.DOCKERHUB_ACCOUNT }}/${{secrets.DOCKERHUB_REPO}}
+      - name: Show files
+        run: |
+          ls .
+          ls bin/
+      - name: Log into registry
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v1
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.DOCKER_HUB_USER }}
+          password: ${{ secrets.DOCKER_HUB_TOKEN }}
+
+      # Build and push Docker image with Buildx (don't push on PR)
+      # https://github.com/docker/build-push-action
+      - name: Build and push Docker image
+        id: build-and-push
+        uses: docker/build-push-action@v2
+        with:
+          context: .
+          file: ./Dockerfile
+          push: ${{ github.event_name != 'pull_request' }}
+          platforms: |
+            linux/386
+            linux/amd64
+            linux/arm64/v8
+            linux/arm/v7
+          #            linux/riscv64
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}

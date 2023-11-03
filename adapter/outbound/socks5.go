@@ -9,9 +9,10 @@ import (
 	"net"
 	"strconv"
 
+	N "github.com/Dreamacro/clash/common/net"
+	"github.com/Dreamacro/clash/component/ca"
 	"github.com/Dreamacro/clash/component/dialer"
 	"github.com/Dreamacro/clash/component/proxydialer"
-	tlsC "github.com/Dreamacro/clash/component/tls"
 	C "github.com/Dreamacro/clash/constant"
 	"github.com/Dreamacro/clash/transport/socks5"
 )
@@ -39,12 +40,10 @@ type Socks5Option struct {
 	Fingerprint    string `proxy:"fingerprint,omitempty"`
 }
 
-// StreamConn implements C.ProxyAdapter
-func (ss *Socks5) StreamConn(c net.Conn, metadata *C.Metadata) (net.Conn, error) {
+// StreamConnContext implements C.ProxyAdapter
+func (ss *Socks5) StreamConnContext(ctx context.Context, c net.Conn, metadata *C.Metadata) (net.Conn, error) {
 	if ss.tls {
 		cc := tls.Client(c, ss.tlsConfig)
-		ctx, cancel := context.WithTimeout(context.Background(), C.DefaultTLSTimeout)
-		defer cancel()
 		err := cc.HandshakeContext(ctx)
 		c = cc
 		if err != nil {
@@ -82,13 +81,13 @@ func (ss *Socks5) DialContextWithDialer(ctx context.Context, dialer C.Dialer, me
 	if err != nil {
 		return nil, fmt.Errorf("%s connect error: %w", ss.addr, err)
 	}
-	tcpKeepAlive(c)
+	N.TCPKeepAlive(c)
 
 	defer func(c net.Conn) {
 		safeConnClose(c, err)
 	}(c)
 
-	c, err = ss.StreamConn(c, metadata)
+	c, err = ss.StreamConnContext(ctx, c, metadata)
 	if err != nil {
 		return nil, err
 	}
@@ -128,7 +127,7 @@ func (ss *Socks5) ListenPacketContext(ctx context.Context, metadata *C.Metadata,
 		safeConnClose(c, err)
 	}(c)
 
-	tcpKeepAlive(c)
+	N.TCPKeepAlive(c)
 	var user *socks5.User
 	if ss.user != "" {
 		user = &socks5.User{
@@ -157,7 +156,7 @@ func (ss *Socks5) ListenPacketContext(ctx context.Context, metadata *C.Metadata,
 		bindUDPAddr.IP = serverAddr.IP
 	}
 
-	pc, err := dialer.ListenPacket(ctx, dialer.ParseNetwork("udp", bindUDPAddr.AddrPort().Addr()), "", ss.Base.DialOptions(opts...)...)
+	pc, err := cDialer.ListenPacket(ctx, "udp", "", bindUDPAddr.AddrPort())
 	if err != nil {
 		return
 	}
@@ -181,13 +180,10 @@ func NewSocks5(option Socks5Option) (*Socks5, error) {
 			ServerName:         option.Server,
 		}
 
-		if len(option.Fingerprint) == 0 {
-			tlsConfig = tlsC.GetGlobalTLSConfig(tlsConfig)
-		} else {
-			var err error
-			if tlsConfig, err = tlsC.GetSpecifiedFingerprintTLSConfig(tlsConfig, option.Fingerprint); err != nil {
-				return nil, err
-			}
+		var err error
+		tlsConfig, err = ca.GetSpecifiedFingerprintTLSConfig(tlsConfig, option.Fingerprint)
+		if err != nil {
+			return nil, err
 		}
 	}
 
@@ -198,6 +194,7 @@ func NewSocks5(option Socks5Option) (*Socks5, error) {
 			tp:     C.Socks5,
 			udp:    option.UDP,
 			tfo:    option.TFO,
+			mpTcp:  option.MPTCP,
 			iface:  option.Interface,
 			rmark:  option.RoutingMark,
 			prefer: C.NewDNSPrefer(option.IPVersion),

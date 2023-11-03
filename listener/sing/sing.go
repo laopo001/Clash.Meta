@@ -3,7 +3,6 @@ package sing
 import (
 	"context"
 	"errors"
-	"golang.org/x/exp/slices"
 	"net"
 	"net/netip"
 	"sync"
@@ -15,9 +14,10 @@ import (
 	"github.com/Dreamacro/clash/log"
 	"github.com/Dreamacro/clash/transport/socks5"
 
+	vmess "github.com/metacubex/sing-vmess"
 	mux "github.com/sagernet/sing-mux"
-	vmess "github.com/sagernet/sing-vmess"
 	"github.com/sagernet/sing/common/buf"
+	"github.com/sagernet/sing/common/bufio"
 	"github.com/sagernet/sing/common/bufio/deadline"
 	E "github.com/sagernet/sing/common/exceptions"
 	M "github.com/sagernet/sing/common/metadata"
@@ -57,6 +57,14 @@ func (c *waitCloseConn) Upstream() any {
 	return c.ExtendedConn
 }
 
+func (c *waitCloseConn) ReaderReplaceable() bool {
+	return true
+}
+
+func (c *waitCloseConn) WriterReplaceable() bool {
+	return true
+}
+
 func UpstreamMetadata(metadata M.Metadata) M.Metadata {
 	return M.Metadata{
 		Source:      metadata.Source,
@@ -64,12 +72,27 @@ func UpstreamMetadata(metadata M.Metadata) M.Metadata {
 	}
 }
 
-func (h *ListenerHandler) NewConnection(ctx context.Context, conn net.Conn, metadata M.Metadata) error {
-	additions := h.Additions
-	if ctxAdditions := getAdditions(ctx); len(ctxAdditions) > 0 {
-		additions = slices.Clone(additions)
-		additions = append(additions, ctxAdditions...)
+func ConvertMetadata(metadata *C.Metadata) M.Metadata {
+	return M.Metadata{
+		Protocol:    metadata.Type.String(),
+		Source:      M.SocksaddrFrom(metadata.SrcIP, metadata.SrcPort),
+		Destination: M.ParseSocksaddrHostPort(metadata.String(), metadata.DstPort),
 	}
+}
+
+func (h *ListenerHandler) IsSpecialFqdn(fqdn string) bool {
+	switch fqdn {
+	case mux.Destination.Fqdn:
+	case vmess.MuxDestination.Fqdn:
+	case uot.MagicAddress:
+	case uot.LegacyMagicAddress:
+	default:
+		return false
+	}
+	return true
+}
+
+func (h *ListenerHandler) ParseSpecialFqdn(ctx context.Context, conn net.Conn, metadata M.Metadata) error {
 	switch metadata.Destination.Fqdn {
 	case mux.Destination.Fqdn:
 		return mux.HandleConnection(ctx, h, log.SingLogger, conn, UpstreamMetadata(metadata))
@@ -86,6 +109,13 @@ func (h *ListenerHandler) NewConnection(ctx context.Context, conn net.Conn, meta
 		metadata.Destination = M.Socksaddr{Addr: netip.IPv4Unspecified()}
 		return h.NewPacketConnection(ctx, uot.NewConn(conn, uot.Request{}), metadata)
 	}
+	return errors.New("not special fqdn")
+}
+
+func (h *ListenerHandler) NewConnection(ctx context.Context, conn net.Conn, metadata M.Metadata) error {
+	if h.IsSpecialFqdn(metadata.Destination.Fqdn) {
+		return h.ParseSpecialFqdn(ctx, conn, metadata)
+	}
 	target := socks5.ParseAddr(metadata.Destination.String())
 	wg := &sync.WaitGroup{}
 	defer wg.Wait() // this goroutine must exit after conn.Close()
@@ -94,15 +124,13 @@ func (h *ListenerHandler) NewConnection(ctx context.Context, conn net.Conn, meta
 	if deadline.NeedAdditionalReadDeadline(conn) {
 		conn = N.NewDeadlineConn(conn) // conn from sing should check NeedAdditionalReadDeadline
 	}
-	h.TcpIn <- inbound.NewSocket(target, &waitCloseConn{ExtendedConn: N.NewExtendedConn(conn), wg: wg, rAddr: metadata.Source.TCPAddr()}, h.Type, additions...)
+	h.TcpIn <- inbound.NewSocket(target, &waitCloseConn{ExtendedConn: N.NewExtendedConn(conn), wg: wg, rAddr: metadata.Source.TCPAddr()}, h.Type, combineAdditions(ctx, h.Additions)...)
 	return nil
 }
 
 func (h *ListenerHandler) NewPacketConnection(ctx context.Context, conn network.PacketConn, metadata M.Metadata) error {
-	additions := h.Additions
-	if ctxAdditions := getAdditions(ctx); len(ctxAdditions) > 0 {
-		additions = slices.Clone(additions)
-		additions = append(additions, ctxAdditions...)
+	if deadline.NeedAdditionalReadDeadline(conn) {
+		conn = deadline.NewFallbackPacketConn(bufio.NewNetPacketConn(conn)) // conn from sing should check NeedAdditionalReadDeadline
 	}
 	defer func() { _ = conn.Close() }()
 	mutex := sync.Mutex{}
@@ -112,11 +140,30 @@ func (h *ListenerHandler) NewPacketConnection(ctx context.Context, conn network.
 		defer mutex.Unlock()
 		conn2 = nil
 	}()
+	var buff *buf.Buffer
+	newBuffer := func() *buf.Buffer {
+		buff = buf.NewPacket() // do not use stack buffer
+		return buff
+	}
+	readWaiter, isReadWaiter := bufio.CreatePacketReadWaiter(conn)
+	if isReadWaiter {
+		readWaiter.InitializeReadWaiter(newBuffer)
+	}
 	for {
-		buff := buf.NewPacket() // do not use stack buffer
-		dest, err := conn.ReadPacket(buff)
+		var (
+			dest M.Socksaddr
+			err  error
+		)
+		buff = nil // clear last loop status, avoid repeat release
+		if isReadWaiter {
+			dest, err = readWaiter.WaitReadPacket()
+		} else {
+			dest, err = conn.ReadPacket(newBuffer())
+		}
 		if err != nil {
-			buff.Release()
+			if buff != nil {
+				buff.Release()
+			}
 			if ShouldIgnorePacketError(err) {
 				break
 			}
@@ -131,7 +178,7 @@ func (h *ListenerHandler) NewPacketConnection(ctx context.Context, conn network.
 			buff:  buff,
 		}
 		select {
-		case h.UdpIn <- inbound.NewPacket(target, packet, h.Type, additions...):
+		case h.UdpIn <- inbound.NewPacket(target, packet, h.Type, combineAdditions(ctx, h.Additions)...):
 		default:
 		}
 	}

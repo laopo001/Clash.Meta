@@ -9,6 +9,7 @@ import (
 
 	"github.com/Dreamacro/clash/adapter/outbound"
 	"github.com/Dreamacro/clash/common/atomic"
+	"github.com/Dreamacro/clash/common/utils"
 	C "github.com/Dreamacro/clash/constant"
 	"github.com/Dreamacro/clash/constant/provider"
 	types "github.com/Dreamacro/clash/constant/provider"
@@ -130,10 +131,6 @@ func (gb *GroupBase) GetProxies(touch bool) []C.Proxy {
 		}
 	}
 
-	if len(proxies) == 0 {
-		return append(proxies, tunnel.Proxies()["COMPATIBLE"])
-	}
-
 	if len(gb.providers) > 1 && len(gb.filterRegs) > 1 {
 		var newProxies []C.Proxy
 		proxiesSet := map[string]struct{}{}
@@ -189,10 +186,14 @@ func (gb *GroupBase) GetProxies(touch bool) []C.Proxy {
 		proxies = newProxies
 	}
 
+	if len(proxies) == 0 {
+		return append(proxies, tunnel.Proxies()["COMPATIBLE"])
+	}
+
 	return proxies
 }
 
-func (gb *GroupBase) URLTest(ctx context.Context, url string) (map[string]uint16, error) {
+func (gb *GroupBase) URLTest(ctx context.Context, url string, expectedStatus utils.IntRanges[uint16]) (map[string]uint16, error) {
 	var wg sync.WaitGroup
 	var lock sync.Mutex
 	mp := map[string]uint16{}
@@ -201,7 +202,7 @@ func (gb *GroupBase) URLTest(ctx context.Context, url string) (map[string]uint16
 		proxy := proxy
 		wg.Add(1)
 		go func() {
-			delay, err := proxy.URLTest(ctx, url)
+			delay, err := proxy.URLTest(ctx, url, expectedStatus, C.DropHistory)
 			if err == nil {
 				lock.Lock()
 				mp[proxy.Name()] = delay

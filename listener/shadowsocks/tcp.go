@@ -59,7 +59,7 @@ func New(config LC.ShadowsocksServer, tcpIn chan<- C.ConnContext, udpIn chan<- C
 					}
 					continue
 				}
-				_ = c.(*net.TCPConn).SetKeepAlive(true)
+				N.TCPKeepAlive(c)
 				go sl.HandleConn(c, tcpIn)
 			}
 		}()
@@ -103,7 +103,7 @@ func (l *Listener) HandleConn(conn net.Conn, in chan<- C.ConnContext, additions 
 	conn = l.pickCipher.StreamConn(conn)
 	conn = N.NewDeadlineConn(conn) // embed ss can't handle readDeadline correctly
 
-	target, err := socks5.ReadAddr(conn, make([]byte, socks5.MaxAddrLen))
+	target, err := socks5.ReadAddr0(conn)
 	if err != nil {
 		_ = conn.Close()
 		return

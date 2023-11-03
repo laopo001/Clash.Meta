@@ -6,6 +6,7 @@ import (
 	"net"
 	"strconv"
 
+	N "github.com/Dreamacro/clash/common/net"
 	"github.com/Dreamacro/clash/common/structure"
 	"github.com/Dreamacro/clash/component/dialer"
 	"github.com/Dreamacro/clash/component/proxydialer"
@@ -52,15 +53,14 @@ func streamConn(c net.Conn, option streamOption) *snell.Snell {
 	return snell.StreamConn(c, option.psk, option.version)
 }
 
-// StreamConn implements C.ProxyAdapter
-func (s *Snell) StreamConn(c net.Conn, metadata *C.Metadata) (net.Conn, error) {
+// StreamConnContext implements C.ProxyAdapter
+func (s *Snell) StreamConnContext(ctx context.Context, c net.Conn, metadata *C.Metadata) (net.Conn, error) {
 	c = streamConn(c, streamOption{s.psk, s.version, s.addr, s.obfsOption})
 	if metadata.NetWork == C.UDP {
 		err := snell.WriteUDPHeader(c, s.version)
 		return c, err
 	}
-	port, _ := strconv.ParseUint(metadata.DstPort, 10, 16)
-	err := snell.WriteHeader(c, metadata.String(), uint(port), s.version)
+	err := snell.WriteHeader(c, metadata.String(), uint(metadata.DstPort), s.version)
 	return c, err
 }
 
@@ -72,8 +72,7 @@ func (s *Snell) DialContext(ctx context.Context, metadata *C.Metadata, opts ...d
 			return nil, err
 		}
 
-		port, _ := strconv.ParseUint(metadata.DstPort, 10, 16)
-		if err = snell.WriteHeader(c, metadata.String(), uint(port), s.version); err != nil {
+		if err = snell.WriteHeader(c, metadata.String(), uint(metadata.DstPort), s.version); err != nil {
 			c.Close()
 			return nil, err
 		}
@@ -95,13 +94,13 @@ func (s *Snell) DialContextWithDialer(ctx context.Context, dialer C.Dialer, meta
 	if err != nil {
 		return nil, fmt.Errorf("%s connect error: %w", s.addr, err)
 	}
-	tcpKeepAlive(c)
+	N.TCPKeepAlive(c)
 
 	defer func(c net.Conn) {
 		safeConnClose(c, err)
 	}(c)
 
-	c, err = s.StreamConn(c, metadata)
+	c, err = s.StreamConnContext(ctx, c, metadata)
 	return NewConn(c, s), err
 }
 
@@ -123,7 +122,7 @@ func (s *Snell) ListenPacketWithDialer(ctx context.Context, dialer C.Dialer, met
 	if err != nil {
 		return nil, err
 	}
-	tcpKeepAlive(c)
+	N.TCPKeepAlive(c)
 	c = streamConn(c, streamOption{s.psk, s.version, s.addr, s.obfsOption})
 
 	err = snell.WriteUDPHeader(c, s.version)
@@ -183,6 +182,7 @@ func NewSnell(option SnellOption) (*Snell, error) {
 			tp:     C.Snell,
 			udp:    option.UDP,
 			tfo:    option.TFO,
+			mpTcp:  option.MPTCP,
 			iface:  option.Interface,
 			rmark:  option.RoutingMark,
 			prefer: C.NewDNSPrefer(option.IPVersion),
@@ -208,7 +208,7 @@ func NewSnell(option SnellOption) (*Snell, error) {
 				return nil, err
 			}
 
-			tcpKeepAlive(c)
+			N.TCPKeepAlive(c)
 			return streamConn(c, streamOption{psk, option.Version, addr, obfsOption}), nil
 		})
 	}

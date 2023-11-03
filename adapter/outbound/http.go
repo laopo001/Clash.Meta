@@ -7,14 +7,16 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+
 	"io"
 	"net"
 	"net/http"
 	"strconv"
 
+	N "github.com/Dreamacro/clash/common/net"
+	"github.com/Dreamacro/clash/component/ca"
 	"github.com/Dreamacro/clash/component/dialer"
 	"github.com/Dreamacro/clash/component/proxydialer"
-	tlsC "github.com/Dreamacro/clash/component/tls"
 	C "github.com/Dreamacro/clash/constant"
 )
 
@@ -40,12 +42,10 @@ type HttpOption struct {
 	Headers        map[string]string `proxy:"headers,omitempty"`
 }
 
-// StreamConn implements C.ProxyAdapter
-func (h *Http) StreamConn(c net.Conn, metadata *C.Metadata) (net.Conn, error) {
+// StreamConnContext implements C.ProxyAdapter
+func (h *Http) StreamConnContext(ctx context.Context, c net.Conn, metadata *C.Metadata) (net.Conn, error) {
 	if h.tlsConfig != nil {
 		cc := tls.Client(c, h.tlsConfig)
-		ctx, cancel := context.WithTimeout(context.Background(), C.DefaultTLSTimeout)
-		defer cancel()
 		err := cc.HandshakeContext(ctx)
 		c = cc
 		if err != nil {
@@ -76,13 +76,13 @@ func (h *Http) DialContextWithDialer(ctx context.Context, dialer C.Dialer, metad
 	if err != nil {
 		return nil, fmt.Errorf("%s connect error: %w", h.addr, err)
 	}
-	tcpKeepAlive(c)
+	N.TCPKeepAlive(c)
 
 	defer func(c net.Conn) {
 		safeConnClose(c, err)
 	}(c)
 
-	c, err = h.StreamConn(c, metadata)
+	c, err = h.StreamConnContext(ctx, c, metadata)
 	if err != nil {
 		return nil, err
 	}
@@ -157,19 +157,13 @@ func NewHttp(option HttpOption) (*Http, error) {
 		if option.SNI != "" {
 			sni = option.SNI
 		}
-		if len(option.Fingerprint) == 0 {
-			tlsConfig = tlsC.GetGlobalTLSConfig(&tls.Config{
-				InsecureSkipVerify: option.SkipCertVerify,
-				ServerName:         sni,
-			})
-		} else {
-			var err error
-			if tlsConfig, err = tlsC.GetSpecifiedFingerprintTLSConfig(&tls.Config{
-				InsecureSkipVerify: option.SkipCertVerify,
-				ServerName:         sni,
-			}, option.Fingerprint); err != nil {
-				return nil, err
-			}
+		var err error
+		tlsConfig, err = ca.GetSpecifiedFingerprintTLSConfig(&tls.Config{
+			InsecureSkipVerify: option.SkipCertVerify,
+			ServerName:         sni,
+		}, option.Fingerprint)
+		if err != nil {
+			return nil, err
 		}
 	}
 
@@ -179,6 +173,7 @@ func NewHttp(option HttpOption) (*Http, error) {
 			addr:   net.JoinHostPort(option.Server, strconv.Itoa(option.Port)),
 			tp:     C.Http,
 			tfo:    option.TFO,
+			mpTcp:  option.MPTCP,
 			iface:  option.Interface,
 			rmark:  option.RoutingMark,
 			prefer: C.NewDNSPrefer(option.IPVersion),

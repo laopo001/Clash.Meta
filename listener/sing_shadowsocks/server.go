@@ -5,15 +5,16 @@ import (
 	"fmt"
 	"net"
 	"strings"
-	"time"
 
 	"github.com/Dreamacro/clash/adapter/inbound"
+	N "github.com/Dreamacro/clash/common/net"
 	"github.com/Dreamacro/clash/common/sockopt"
 	C "github.com/Dreamacro/clash/constant"
 	LC "github.com/Dreamacro/clash/listener/config"
 	embedSS "github.com/Dreamacro/clash/listener/shadowsocks"
 	"github.com/Dreamacro/clash/listener/sing"
 	"github.com/Dreamacro/clash/log"
+	"github.com/Dreamacro/clash/ntp"
 
 	shadowsocks "github.com/metacubex/sing-shadowsocks"
 	"github.com/metacubex/sing-shadowsocks/shadowaead"
@@ -21,7 +22,7 @@ import (
 	"github.com/sagernet/sing/common"
 	"github.com/sagernet/sing/common/buf"
 	"github.com/sagernet/sing/common/bufio"
-	"github.com/sagernet/sing/common/metadata"
+	M "github.com/sagernet/sing/common/metadata"
 )
 
 type Listener struct {
@@ -64,7 +65,7 @@ func New(config LC.ShadowsocksServer, tcpIn chan<- C.ConnContext, udpIn chan<- C
 	case common.Contains(shadowaead.List, config.Cipher):
 		sl.service, err = shadowaead.NewService(config.Cipher, nil, config.Password, udpTimeout, h)
 	case common.Contains(shadowaead_2022.List, config.Cipher):
-		sl.service, err = shadowaead_2022.NewServiceWithPassword(config.Cipher, config.Password, udpTimeout, h, time.Now)
+		sl.service, err = shadowaead_2022.NewServiceWithPassword(config.Cipher, config.Password, udpTimeout, h, ntp.Now)
 	default:
 		err = fmt.Errorf("shadowsocks: unsupported method: %s", config.Cipher)
 		return embedSS.New(config, tcpIn, udpIn)
@@ -92,19 +93,38 @@ func New(config LC.ShadowsocksServer, tcpIn chan<- C.ConnContext, udpIn chan<- C
 
 			go func() {
 				conn := bufio.NewPacketConn(ul)
+				var buff *buf.Buffer
+				newBuffer := func() *buf.Buffer {
+					buff = buf.NewPacket() // do not use stack buffer
+					return buff
+				}
+				readWaiter, isReadWaiter := bufio.CreatePacketReadWaiter(conn)
+				if isReadWaiter {
+					readWaiter.InitializeReadWaiter(newBuffer)
+				}
 				for {
-					buff := buf.NewPacket()
-					remoteAddr, err := conn.ReadPacket(buff)
+					var (
+						dest M.Socksaddr
+						err  error
+					)
+					buff = nil // clear last loop status, avoid repeat release
+					if isReadWaiter {
+						dest, err = readWaiter.WaitReadPacket()
+					} else {
+						dest, err = conn.ReadPacket(newBuffer())
+					}
 					if err != nil {
-						buff.Release()
+						if buff != nil {
+							buff.Release()
+						}
 						if sl.closed {
 							break
 						}
 						continue
 					}
-					_ = sl.service.NewPacket(context.TODO(), conn, buff, metadata.Metadata{
+					_ = sl.service.NewPacket(context.TODO(), conn, buff, M.Metadata{
 						Protocol: "shadowsocks",
-						Source:   remoteAddr,
+						Source:   dest,
 					})
 				}
 			}()
@@ -126,7 +146,7 @@ func New(config LC.ShadowsocksServer, tcpIn chan<- C.ConnContext, udpIn chan<- C
 					}
 					continue
 				}
-				_ = c.(*net.TCPConn).SetKeepAlive(true)
+				N.TCPKeepAlive(c)
 
 				go sl.HandleConn(c, tcpIn)
 			}
@@ -170,9 +190,9 @@ func (l *Listener) AddrList() (addrList []net.Addr) {
 
 func (l *Listener) HandleConn(conn net.Conn, in chan<- C.ConnContext, additions ...inbound.Addition) {
 	ctx := sing.WithAdditions(context.TODO(), additions...)
-	err := l.service.NewConnection(ctx, conn, metadata.Metadata{
+	err := l.service.NewConnection(ctx, conn, M.Metadata{
 		Protocol: "shadowsocks",
-		Source:   metadata.ParseSocksaddr(conn.RemoteAddr().String()),
+		Source:   M.ParseSocksaddr(conn.RemoteAddr().String()),
 	})
 	if err != nil {
 		_ = conn.Close()

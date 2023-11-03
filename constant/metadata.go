@@ -30,6 +30,7 @@ const (
 	TUNNEL
 	TUN
 	TUIC
+	HYSTERIA2
 	INNER
 )
 
@@ -78,6 +79,8 @@ func (t Type) String() string {
 		return "Tun"
 	case TUIC:
 		return "Tuic"
+	case HYSTERIA2:
+		return "Hysteria2"
 	case INNER:
 		return "Inner"
 	default:
@@ -110,6 +113,8 @@ func ParseType(t string) (*Type, error) {
 		res = TUN
 	case "TUIC":
 		res = TUIC
+	case "HYSTERIA2":
+		res = HYSTERIA2
 	case "INNER":
 		res = INNER
 	default:
@@ -128,11 +133,12 @@ type Metadata struct {
 	Type         Type       `json:"type"`
 	SrcIP        netip.Addr `json:"sourceIP"`
 	DstIP        netip.Addr `json:"destinationIP"`
-	SrcPort      string     `json:"sourcePort"`
-	DstPort      string     `json:"destinationPort"`
+	SrcPort      uint16     `json:"sourcePort,string"`      // `,string` is used to compatible with old version json output
+	DstPort      uint16     `json:"destinationPort,string"` // `,string` is used to compatible with old version json output
 	InIP         netip.Addr `json:"inboundIP"`
-	InPort       string     `json:"inboundPort"`
+	InPort       uint16     `json:"inboundPort,string"` // `,string` is used to compatible with old version json output
 	InName       string     `json:"inboundName"`
+	InUser       string     `json:"inboundUser"`
 	Host         string     `json:"host"`
 	DNSMode      DNSMode    `json:"dnsMode"`
 	Uid          uint32     `json:"uid"`
@@ -146,11 +152,11 @@ type Metadata struct {
 }
 
 func (m *Metadata) RemoteAddress() string {
-	return net.JoinHostPort(m.String(), m.DstPort)
+	return net.JoinHostPort(m.String(), strconv.FormatUint(uint64(m.DstPort), 10))
 }
 
 func (m *Metadata) SourceAddress() string {
-	return net.JoinHostPort(m.SrcIP.String(), m.SrcPort)
+	return net.JoinHostPort(m.SrcIP.String(), strconv.FormatUint(uint64(m.SrcPort), 10))
 }
 
 func (m *Metadata) SourceDetail() string {
@@ -168,6 +174,10 @@ func (m *Metadata) SourceDetail() string {
 	default:
 		return fmt.Sprintf("%s", m.SourceAddress())
 	}
+}
+
+func (m *Metadata) SourceValid() bool {
+	return m.SrcPort != 0 && m.SrcIP.IsValid()
 }
 
 func (m *Metadata) AddrType() int {
@@ -205,15 +215,15 @@ func (m *Metadata) Pure() *Metadata {
 	return m
 }
 
+func (m *Metadata) AddrPort() netip.AddrPort {
+	return netip.AddrPortFrom(m.DstIP.Unmap(), m.DstPort)
+}
+
 func (m *Metadata) UDPAddr() *net.UDPAddr {
 	if m.NetWork != UDP || !m.DstIP.IsValid() {
 		return nil
 	}
-	port, _ := strconv.ParseUint(m.DstPort, 10, 16)
-	return &net.UDPAddr{
-		IP:   m.DstIP.AsSlice(),
-		Port: int(port),
-	}
+	return net.UDPAddrFromAddrPort(m.AddrPort())
 }
 
 func (m *Metadata) String() string {
@@ -236,6 +246,11 @@ func (m *Metadata) SetRemoteAddress(rawAddress string) error {
 		return err
 	}
 
+	var uint16Port uint16
+	if port, err := strconv.ParseUint(port, 10, 16); err == nil {
+		uint16Port = uint16(port)
+	}
+
 	if ip, err := netip.ParseAddr(host); err != nil {
 		m.Host = host
 		m.DstIP = netip.Addr{}
@@ -243,7 +258,7 @@ func (m *Metadata) SetRemoteAddress(rawAddress string) error {
 		m.Host = ""
 		m.DstIP = ip.Unmap()
 	}
-	m.DstPort = port
+	m.DstPort = uint16Port
 
 	return nil
 }

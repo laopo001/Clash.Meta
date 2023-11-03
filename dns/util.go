@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"strconv"
 	"strings"
 	"time"
 
@@ -21,34 +22,55 @@ import (
 	"github.com/Dreamacro/clash/tunnel"
 
 	D "github.com/miekg/dns"
+	"github.com/samber/lo"
 )
 
 const (
 	MaxMsgSize = 65535
 )
 
-func putMsgToCache(c *cache.LruCache[string, *D.Msg], key string, msg *D.Msg) {
-	// skip dns cache for acme challenge
-	if len(msg.Question) != 0 {
-		if q := msg.Question[0]; q.Qtype == D.TypeTXT && strings.HasPrefix(q.Name, "_acme-challenge") {
-			log.Debugln("[DNS] dns cache ignored because of acme challenge for: %s", q.Name)
-			return
-		}
+func minimalTTL(records []D.RR) uint32 {
+	minObj := lo.MinBy(records, func(r1 D.RR, r2 D.RR) bool {
+		return r1.Header().Ttl < r2.Header().Ttl
+	})
+	if minObj != nil {
+		return minObj.Header().Ttl
 	}
-	var ttl uint32
-	switch {
-	case len(msg.Answer) != 0:
-		ttl = msg.Answer[0].Header().Ttl
-	case len(msg.Ns) != 0:
-		ttl = msg.Ns[0].Header().Ttl
-	case len(msg.Extra) != 0:
-		ttl = msg.Extra[0].Header().Ttl
-	default:
-		log.Debugln("[DNS] response msg empty: %#v", msg)
+	return 0
+}
+
+func updateTTL(records []D.RR, ttl uint32) {
+	if len(records) == 0 {
 		return
 	}
+	delta := minimalTTL(records) - ttl
+	for i := range records {
+		records[i].Header().Ttl = lo.Clamp(records[i].Header().Ttl-delta, 1, records[i].Header().Ttl)
+	}
+}
 
-	c.SetWithExpire(key, msg.Copy(), time.Now().Add(time.Second*time.Duration(ttl)))
+func putMsgToCache(c *cache.LruCache[string, *D.Msg], key string, msg *D.Msg) {
+	putMsgToCacheWithExpire(c, key, msg, 0)
+}
+
+func putMsgToCacheWithExpire(c *cache.LruCache[string, *D.Msg], key string, msg *D.Msg, sec uint32) {
+	if sec == 0 {
+		if sec = minimalTTL(msg.Answer); sec == 0 {
+			if sec = minimalTTL(msg.Ns); sec == 0 {
+				sec = minimalTTL(msg.Extra)
+			}
+		}
+		if sec == 0 {
+			return
+		}
+
+		if sec > 120 {
+			sec = 120 // at least 2 minutes to cache
+		}
+
+	}
+
+	c.SetWithExpire(key, msg.Copy(), time.Now().Add(time.Duration(sec)*time.Second))
 }
 
 func setMsgTTL(msg *D.Msg, ttl uint32) {
@@ -65,12 +87,18 @@ func setMsgTTL(msg *D.Msg, ttl uint32) {
 	}
 }
 
+func updateMsgTTL(msg *D.Msg, ttl uint32) {
+	updateTTL(msg.Answer, ttl)
+	updateTTL(msg.Ns, ttl)
+	updateTTL(msg.Extra, ttl)
+}
+
 func isIPRequest(q D.Question) bool {
 	return q.Qclass == D.ClassINET && (q.Qtype == D.TypeA || q.Qtype == D.TypeAAAA || q.Qtype == D.TypeCNAME)
 }
 
 func transform(servers []NameServer, resolver *Resolver) []dnsClient {
-	ret := []dnsClient{}
+	ret := make([]dnsClient, 0, len(servers))
 	for _, s := range servers {
 		switch s.Net {
 		case "https":
@@ -90,6 +118,9 @@ func transform(servers []NameServer, resolver *Resolver) []dnsClient {
 				continue
 			}
 			ret = append(ret, clients...)
+			continue
+		case "rcode":
+			ret = append(ret, newRCodeClient(s.Addr))
 			continue
 		case "quic":
 			if doq, err := newDoQ(resolver, s.Addr, s.ProxyAdapter, s.ProxyName); err == nil {
@@ -167,6 +198,10 @@ func getDialHandler(r *Resolver, proxyAdapter C.ProxyAdapter, proxyName string, 
 			if err != nil {
 				return nil, err
 			}
+			uintPort, err := strconv.ParseUint(port, 10, 16)
+			if err != nil {
+				return nil, err
+			}
 			if proxyAdapter == nil {
 				var ok bool
 				proxyAdapter, ok = tunnel.Proxies()[proxyName]
@@ -180,7 +215,7 @@ func getDialHandler(r *Resolver, proxyAdapter C.ProxyAdapter, proxyName string, 
 				metadata := &C.Metadata{
 					NetWork: C.TCP,
 					Host:    host,
-					DstPort: port,
+					DstPort: uint16(uintPort),
 				}
 				if proxyAdapter != nil {
 					if proxyAdapter.IsL3Protocol(metadata) { // L3 proxy should resolve domain before to avoid loopback
@@ -205,7 +240,7 @@ func getDialHandler(r *Resolver, proxyAdapter C.ProxyAdapter, proxyName string, 
 					NetWork: C.UDP,
 					Host:    "",
 					DstIP:   dstIP,
-					DstPort: port,
+					DstPort: uint16(uintPort),
 				}
 				if proxyAdapter == nil {
 					return dialer.DialContext(ctx, network, addr, opts...)
@@ -231,6 +266,10 @@ func listenPacket(ctx context.Context, proxyAdapter C.ProxyAdapter, proxyName st
 	if err != nil {
 		return nil, err
 	}
+	uintPort, err := strconv.ParseUint(port, 10, 16)
+	if err != nil {
+		return nil, err
+	}
 	if proxyAdapter == nil {
 		var ok bool
 		proxyAdapter, ok = tunnel.Proxies()[proxyName]
@@ -248,10 +287,10 @@ func listenPacket(ctx context.Context, proxyAdapter C.ProxyAdapter, proxyName st
 		NetWork: C.UDP,
 		Host:    "",
 		DstIP:   dstIP,
-		DstPort: port,
+		DstPort: uint16(uintPort),
 	}
 	if proxyAdapter == nil {
-		return dialer.ListenPacket(ctx, dialer.ParseNetwork(network, dstIP), "", opts...)
+		return dialer.NewDialer(opts...).ListenPacket(ctx, dialer.ParseNetwork(network, dstIP), "", netip.AddrPortFrom(metadata.DstIP, metadata.DstPort))
 	}
 
 	if !proxyAdapter.SupportUDP() {
@@ -261,32 +300,38 @@ func listenPacket(ctx context.Context, proxyAdapter C.ProxyAdapter, proxyName st
 	return proxyAdapter.ListenPacketContext(ctx, metadata, opts...)
 }
 
-func batchExchange(ctx context.Context, clients []dnsClient, m *D.Msg) (msg *D.Msg, err error) {
+func batchExchange(ctx context.Context, clients []dnsClient, m *D.Msg) (msg *D.Msg, cache bool, err error) {
+	cache = true
 	fast, ctx := picker.WithTimeout[*D.Msg](ctx, resolver.DefaultDNSTimeout)
+	defer fast.Close()
 	domain := msgToDomain(m)
 	for _, client := range clients {
-		r := client
+		if _, isRCodeClient := client.(rcodeClient); isRCodeClient {
+			msg, err = client.Exchange(m)
+			return msg, false, err
+		}
+		client := client // shadow define client to ensure the value captured by the closure will not be changed in the next loop
 		fast.Go(func() (*D.Msg, error) {
-			log.Debugln("[DNS] resolve %s from %s", domain, r.Address())
-			m, err := r.ExchangeContext(ctx, m)
+			log.Debugln("[DNS] resolve %s from %s", domain, client.Address())
+			m, err := client.ExchangeContext(ctx, m)
 			if err != nil {
 				return nil, err
-			} else if m.Rcode == D.RcodeServerFailure || m.Rcode == D.RcodeRefused {
-				return nil, errors.New("server failure")
+			} else if cache && (m.Rcode == D.RcodeServerFailure || m.Rcode == D.RcodeRefused) {
+				// currently, cache indicates whether this msg was from a RCode client,
+				// so we would ignore RCode errors from RCode clients.
+				return nil, errors.New("server failure: " + D.RcodeToString[m.Rcode])
 			}
-			log.Debugln("[DNS] %s --> %s, from %s", domain, msgToIP(m), r.Address())
+			log.Debugln("[DNS] %s --> %s, from %s", domain, msgToIP(m), client.Address())
 			return m, nil
 		})
 	}
 
-	elm := fast.Wait()
-	if elm == nil {
-		err := errors.New("all DNS requests failed")
+	msg = fast.Wait()
+	if msg == nil {
+		err = errors.New("all DNS requests failed")
 		if fErr := fast.Error(); fErr != nil {
-			err = fmt.Errorf("%w, first error: %s", err, fErr.Error())
+			err = fmt.Errorf("%w, first error: %w", err, fErr)
 		}
-		return nil, err
 	}
-	msg = elm
 	return
 }

@@ -8,13 +8,14 @@ import (
 	"net/http"
 	"strconv"
 
+	N "github.com/Dreamacro/clash/common/net"
+	"github.com/Dreamacro/clash/component/ca"
 	"github.com/Dreamacro/clash/component/dialer"
 	"github.com/Dreamacro/clash/component/proxydialer"
 	tlsC "github.com/Dreamacro/clash/component/tls"
 	C "github.com/Dreamacro/clash/constant"
 	"github.com/Dreamacro/clash/transport/gun"
 	"github.com/Dreamacro/clash/transport/trojan"
-	"github.com/Dreamacro/clash/transport/vless"
 )
 
 type Trojan struct {
@@ -45,12 +46,10 @@ type TrojanOption struct {
 	RealityOpts       RealityOptions `proxy:"reality-opts,omitempty"`
 	GrpcOpts          GrpcOptions    `proxy:"grpc-opts,omitempty"`
 	WSOpts            WSOptions      `proxy:"ws-opts,omitempty"`
-	Flow              string         `proxy:"flow,omitempty"`
-	FlowShow          bool           `proxy:"flow-show,omitempty"`
 	ClientFingerprint string         `proxy:"client-fingerprint,omitempty"`
 }
 
-func (t *Trojan) plainStream(c net.Conn) (net.Conn, error) {
+func (t *Trojan) plainStream(ctx context.Context, c net.Conn) (net.Conn, error) {
 	if t.option.Network == "ws" {
 		host, port, _ := net.SplitHostPort(t.addr)
 		wsOpts := &trojan.WebsocketOption{
@@ -71,14 +70,14 @@ func (t *Trojan) plainStream(c net.Conn) (net.Conn, error) {
 			wsOpts.Headers = header
 		}
 
-		return t.instance.StreamWebsocketConn(c, wsOpts)
+		return t.instance.StreamWebsocketConn(ctx, c, wsOpts)
 	}
 
-	return t.instance.StreamConn(c)
+	return t.instance.StreamConn(ctx, c)
 }
 
-// StreamConn implements C.ProxyAdapter
-func (t *Trojan) StreamConn(c net.Conn, metadata *C.Metadata) (net.Conn, error) {
+// StreamConnContext implements C.ProxyAdapter
+func (t *Trojan) StreamConnContext(ctx context.Context, c net.Conn, metadata *C.Metadata) (net.Conn, error) {
 	var err error
 
 	if tlsC.HaveGlobalFingerprint() && len(t.option.ClientFingerprint) == 0 {
@@ -88,16 +87,11 @@ func (t *Trojan) StreamConn(c net.Conn, metadata *C.Metadata) (net.Conn, error) 
 	if t.transport != nil {
 		c, err = gun.StreamGunWithConn(c, t.gunTLSConfig, t.gunConfig, t.realityConfig)
 	} else {
-		c, err = t.plainStream(c)
+		c, err = t.plainStream(ctx, c)
 	}
 
 	if err != nil {
 		return nil, fmt.Errorf("%s connect error: %w", t.addr, err)
-	}
-
-	c, err = t.instance.PresetXTLSConn(c)
-	if err != nil {
-		return nil, err
 	}
 
 	if metadata.NetWork == C.UDP {
@@ -114,12 +108,6 @@ func (t *Trojan) DialContext(ctx context.Context, metadata *C.Metadata, opts ...
 	if t.transport != nil && len(opts) == 0 {
 		c, err := gun.StreamGunWithTransport(t.transport, t.gunConfig)
 		if err != nil {
-			return nil, err
-		}
-
-		c, err = t.instance.PresetXTLSConn(c)
-		if err != nil {
-			c.Close()
 			return nil, err
 		}
 
@@ -145,13 +133,13 @@ func (t *Trojan) DialContextWithDialer(ctx context.Context, dialer C.Dialer, met
 	if err != nil {
 		return nil, fmt.Errorf("%s connect error: %w", t.addr, err)
 	}
-	tcpKeepAlive(c)
+	N.TCPKeepAlive(c)
 
 	defer func(c net.Conn) {
 		safeConnClose(c, err)
 	}(c)
 
-	c, err = t.StreamConn(c, metadata)
+	c, err = t.StreamConnContext(ctx, c, metadata)
 	if err != nil {
 		return nil, err
 	}
@@ -198,8 +186,8 @@ func (t *Trojan) ListenPacketWithDialer(ctx context.Context, dialer C.Dialer, me
 	defer func(c net.Conn) {
 		safeConnClose(c, err)
 	}(c)
-	tcpKeepAlive(c)
-	c, err = t.plainStream(c)
+	N.TCPKeepAlive(c)
+	c, err = t.plainStream(ctx, c)
 	if err != nil {
 		return nil, fmt.Errorf("%s connect error: %w", t.addr, err)
 	}
@@ -237,22 +225,8 @@ func NewTrojan(option TrojanOption) (*Trojan, error) {
 		ALPN:              option.ALPN,
 		ServerName:        option.Server,
 		SkipCertVerify:    option.SkipCertVerify,
-		FlowShow:          option.FlowShow,
 		Fingerprint:       option.Fingerprint,
 		ClientFingerprint: option.ClientFingerprint,
-	}
-
-	switch option.Network {
-	case "", "tcp":
-		if len(option.Flow) >= 16 {
-			option.Flow = option.Flow[:16]
-			switch option.Flow {
-			case vless.XRO, vless.XRD, vless.XRS:
-				tOption.Flow = option.Flow
-			default:
-				return nil, fmt.Errorf("unsupported xtls flow type: %s", option.Flow)
-			}
-		}
 	}
 
 	if option.SNI != "" {
@@ -266,6 +240,7 @@ func NewTrojan(option TrojanOption) (*Trojan, error) {
 			tp:     C.Trojan,
 			udp:    option.UDP,
 			tfo:    option.TFO,
+			mpTcp:  option.MPTCP,
 			iface:  option.Interface,
 			rmark:  option.RoutingMark,
 			prefer: C.NewDNSPrefer(option.IPVersion),
@@ -295,7 +270,7 @@ func NewTrojan(option TrojanOption) (*Trojan, error) {
 			if err != nil {
 				return nil, fmt.Errorf("%s connect error: %s", t.addr, err.Error())
 			}
-			tcpKeepAlive(c)
+			N.TCPKeepAlive(c)
 			return c, nil
 		}
 
@@ -306,13 +281,10 @@ func NewTrojan(option TrojanOption) (*Trojan, error) {
 			ServerName:         tOption.ServerName,
 		}
 
-		if len(option.Fingerprint) == 0 {
-			tlsConfig = tlsC.GetGlobalTLSConfig(tlsConfig)
-		} else {
-			var err error
-			if tlsConfig, err = tlsC.GetSpecifiedFingerprintTLSConfig(tlsConfig, option.Fingerprint); err != nil {
-				return nil, err
-			}
+		var err error
+		tlsConfig, err = ca.GetSpecifiedFingerprintTLSConfig(tlsConfig, option.Fingerprint)
+		if err != nil {
+			return nil, err
 		}
 
 		t.transport = gun.NewHTTP2Client(dialFn, tlsConfig, tOption.ClientFingerprint, t.realityConfig)
