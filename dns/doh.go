@@ -67,6 +67,7 @@ type dnsOverHTTPS struct {
 	proxyAdapter    C.ProxyAdapter
 	proxyName       string
 	addr            string
+	ipv6            bool
 }
 
 // type check
@@ -83,7 +84,11 @@ func newDoHClient(urlString string, r *Resolver, preferH3 bool, params map[strin
 	if params["h3"] == "true" {
 		httpVersions = []C.HTTPVersion{C.HTTPVersion3}
 	}
-
+	ipv6 := true
+	if params["only_ipv4"] == "true" {
+		ipv6 = false
+	}
+	log.Warnln("ipv6 :%v , proxyName : %v", ipv6, proxyName)
 	doh := &dnsOverHTTPS{
 		url:          u,
 		addr:         u.String(),
@@ -95,6 +100,7 @@ func newDoHClient(urlString string, r *Resolver, preferH3 bool, params map[strin
 			TokenStore:      newQUICTokenStore(),
 		},
 		httpVersions: httpVersions,
+		ipv6:         ipv6,
 	}
 
 	runtime.SetFinalizer(doh, (*dnsOverHTTPS).Close)
@@ -122,6 +128,16 @@ func (doh *dnsOverHTTPS) ExchangeContext(ctx context.Context, m *D.Msg) (msg *D.
 			msg.Id = id
 		}
 	}()
+
+	if !doh.ipv6 {
+		// log.Warnln("old  %v", m)
+		// var result = make([]D.Question, 0)
+		for _, q := range m.Question {
+			if q.Qtype == 28 {
+				return nil, fmt.Errorf("only_ipv4 block")
+			}
+		}
+	}
 
 	// Check if there was already an active client before sending the request.
 	// We'll only attempt to re-connect if there was one.
@@ -153,7 +169,9 @@ func (doh *dnsOverHTTPS) ExchangeContext(ctx context.Context, m *D.Msg) (msg *D.
 
 		return nil, fmt.Errorf("%w (resErr:%v)", err, resErr)
 	}
-
+	// if !doh.ipv6 {
+	// 	log.Warnln("response  %v", msg)
+	// }
 	return msg, err
 }
 
