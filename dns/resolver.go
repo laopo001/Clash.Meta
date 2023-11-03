@@ -200,7 +200,7 @@ func (r *Resolver) exchangeWithoutCache(ctx context.Context, m *D.Msg) (msg *D.M
 
 		isIPReq := isIPRequest(q)
 		if isIPReq {
-			cache=true
+			cache = true
 			return r.ipExchange(ctx, m)
 		}
 
