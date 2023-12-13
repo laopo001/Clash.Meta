@@ -30,3 +30,5 @@ git log --pretty=format:"* %s by @%an" --grep="^chore\|^docs\|^refactor" -i $ver
 echo "" >> release.md
 
 echo "**Full Changelog**: https://github.com/MetaCubeX/Clash.Meta/compare/$version_range" >> release.md
+
+git log -1 --pretty=%s >> release.md 
