@@ -89,10 +89,11 @@ func Start(addr string, tlsAddr string, secret string,
 		r.Mount("/connections", connectionRouter())
 		r.Mount("/providers/proxies", proxyProviderRouter())
 		r.Mount("/providers/rules", ruleProviderRouter())
-		r.Mount("/lru", cacheRouter())
+		r.Mount("/cache", cacheRouter())
 		r.Mount("/dns", dnsRouter())
 		r.Mount("/restart", restartRouter())
 		r.Mount("/upgrade", upgradeRouter())
+		addExternalRouters(r)
 
 	})
 

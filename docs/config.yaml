@@ -13,6 +13,11 @@ authentication: # http,socks入口的验证用户名，密码
 skip-auth-prefixes: # 设置跳过验证的IP段
   - 127.0.0.1/8
   - ::1/128
+lan-allowed-ips: # 允许连接的 IP 地址段，仅作用于 allow-lan 为 true, 默认值为0.0.0.0/0和::/0
+  - 0.0.0.0/0
+  - ::/0
+lan-disallowed-ips: # 禁止连接的 IP 地址段, 黑名单优先级高于白名单, 默认值为空
+  - 192.168.0.3/32
 
 #  find-process-mode has 3 values:always, strict, off
 #  - always, 开启，强制匹配所有进程
@@ -27,6 +32,14 @@ geox-url:
   geoip: "https://fastly.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/geoip.dat"
   geosite: "https://fastly.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/geosite.dat"
   mmdb: "https://fastly.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/geoip.metadb"
+
+geo-auto-update: false # 是否自动更新 geodata
+geo-update-interval: 24 # 更新间隔，单位：小时
+
+# Matcher implementation used by GeoSite, available implementations:
+# - succinct (default, same as rule-set)
+# - mph (from V2Ray, also `hybrid` in Xray)
+# geosite-matcher: succinct
 
 log-level: debug # 日志等级 silent/error/warning/info/debug
 
@@ -90,12 +103,14 @@ profile: # 存储 select 选择记录
 # Tun 配置
 tun:
   enable: false
-  stack: system # gvisor / lwip
+  stack: system # gvisor/mixed
   dns-hijack:
     - 0.0.0.0:53 # 需要劫持的 DNS
   # auto-detect-interface: true # 自动识别出口网卡
   # auto-route: true # 配置路由表
   # mtu: 9000 # 最大传输单元
+  # gso: false # 启用通用分段卸载, 仅支持 Linux
+  # gso-max-size: 65536 # 通用分段卸载包的最大大小
   # strict-route: true # 将所有连接路由到tun来防止泄漏，但你的设备将无法其他设备被访问
   inet4-route-address: # 启用 auto_route 时使用自定义路由而不是默认路由
     - 0.0.0.0/1
@@ -104,6 +119,10 @@ tun:
     - "::/1"
     - "8000::/1"
   # endpoint-independent-nat: false # 启用独立于端点的 NAT
+  # include_interface: # 限制被路由的接口。默认不限制, 与 `exclude_interface` 冲突
+  #   - "lan0"
+  # exclude_interface: # 排除路由的接口, 与 `include_interface` 冲突
+  #   - "lan1"
   # include-uid: # UID 规则仅在 Linux 下被支持，并且需要 auto_route
   # - 0
   # include-uid-range: # 限制被路由的的用户范围
@@ -737,7 +756,7 @@ proxies: # socks5
   # The supported obfses:
   #   plain http_simple http_post
   #   random_head tls1.2_ticket_auth tls1.2_ticket_fastauth
-  # The supported supported protocols:
+  # The supported protocols:
   #   origin auth_sha1_v4 auth_aes128_md5
   #   auth_aes128_sha1 auth_chain_a auth_chain_b
   - name: "ssr"
